@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -143,3 +143,73 @@ jobs:
           else
             cargo test --workspace
           fi
+
+      - name: 打包 A 端模块 (arm64-v8a)
+        if: matrix.name == 'a-side'
+        working-directory: ${{ matrix.ws }}
+        run: |
+          set -euo pipefail
+          python3 build.py --release --abi arm64-v8a
+
+      - name: 上传 A 端模块
+        if: matrix.name == 'a-side'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ommega-a-module-arm64
+          path: a-side/source/target/*.zip
+
+      - name: 打包 B 端模块 (arm64-v8a)
+        if: matrix.name == 'b-side'
+        working-directory: ${{ matrix.ws }}
+        run: |
+          set -euo pipefail
+          python3 build.py --release --abi arm64-v8a
+
+      - name: 上传 B 端模块
+        if: matrix.name == 'b-side'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ommega-b-module-arm64
+          path: b-side/source/target/*.zip
+
+      - name: 编译服务端 (Linux x86_64)
+        if: matrix.name == 'server'
+        working-directory: ${{ matrix.ws }}
+        run: |
+          set -euo pipefail
+          cargo build --release
+
+      - name: 上传服务端二进制
+        if: matrix.name == 'server'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ommega-relay-server-linux
+          path: server/source/target/release/relay_rs
+
+  release:
+    needs: gate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: 发布到 GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Ommega (SDK 优先自适应版)"
+          body: |
+            自动构建产物（已合入优先读取 ro.build.version.sdk 修复补丁）：
+            - `ommega-a-module-arm64`: A 端 Magisk/KernelSU 模块包（已适配 SDK 优先读取，解决伪装 Android 16 时的误判问题）
+            - `ommega-b-module-arm64`: B 端模块包
+            - `ommega-relay-server-linux`: 服务端 Linux 可执行文件
+          files: |
+            dist/**/*.zip
+            dist/**/relay_rs
+
