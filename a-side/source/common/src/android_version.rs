@@ -10,21 +10,24 @@ pub fn android_major_version() -> Option<i32> {
 }
 
 pub fn android_major_version_with(read_property: impl Fn(&str) -> Option<String>) -> Option<i32> {
-    read_property("ro.build.version.release_or_codename")
-        .or_else(|| read_property("ro.build.version.release"))
-        .and_then(|value| value.parse::<i32>().ok())
+    read_property("ro.build.version.sdk")
+        .and_then(|sdk| sdk.parse::<i32>().ok())
+        .and_then(|sdk| match sdk {
+            28 => Some(9),
+            29 => Some(10),
+            30 => Some(11),
+            31 | 32 => Some(12),
+            33 => Some(13),
+            34 => Some(14),
+            35 => Some(15),
+            36 => Some(16),
+            value if value >= 37 => Some(17),
+            _ => None,
+        })
         .or_else(|| {
-            read_property("ro.build.version.sdk")
-                .and_then(|sdk| sdk.parse::<i32>().ok())
-                .map(|sdk| match sdk {
-                    31 | 32 => 12,
-                    33 => 13,
-                    34 => 14,
-                    35 => 15,
-                    36 => 16,
-                    value if value >= 37 => 17,
-                    _ => panic!("unrecognized or unsupported SDK version: {}", sdk),
-                })
+            read_property("ro.build.version.release_or_codename")
+                .or_else(|| read_property("ro.build.version.release"))
+                .and_then(|value| value.parse::<i32>().ok())
         })
 }
 

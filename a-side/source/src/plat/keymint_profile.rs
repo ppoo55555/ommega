@@ -481,6 +481,20 @@ mod tests {
     }
 
     #[test]
+    fn android_major_version_uses_sdk_when_release_is_spoofed() {
+        let values = HashMap::from([
+            ("ro.build.version.release_or_codename", "16"),
+            ("ro.build.version.release", "16"),
+            ("ro.build.version.sdk", "33"),
+        ]);
+
+        assert_eq!(
+            kmr_common::android_version::android_major_version_with(property_reader(&values)),
+            Some(13)
+        );
+    }
+
+    #[test]
     fn system_hardware_info_keeps_canonical_version() {
         let info = KeyMintHardwareInfo {
             versionNumber: 999,
