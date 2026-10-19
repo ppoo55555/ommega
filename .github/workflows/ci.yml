@@ -143,3 +143,18 @@ jobs:
           else
             cargo test --workspace
           fi
+
+      - name: 打包模块 zip
+        if: matrix.target != ''
+        working-directory: ${{ matrix.ws }}
+        run: |
+          set -euo pipefail
+          python3 build.py --release --abi arm64-v8a
+
+      - name: 上传模块 zip 产物
+        if: matrix.target != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-module
+          path: ${{ matrix.ws }}/target/ommega-*.zip
+          if-no-files-found: error
