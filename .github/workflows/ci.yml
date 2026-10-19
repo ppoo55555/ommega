@@ -50,9 +50,12 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update \
             --component clippy --component rustfmt
           rustup default stable
-          # minimal profile 不含 Android target，要单独装；缺了会报
-          # `can't find crate for core`。
-          if [ -n "${{ matrix.target }}" ]; then
+          # 安装对应端打包所需的 Android targets
+          if [ "${{ matrix.name }}" = "a-side" ]; then
+            rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          elif [ "${{ matrix.name }}" = "b-side" ]; then
+            rustup target add aarch64-linux-android x86_64-linux-android
+          elif [ -n "${{ matrix.target }}" ]; then
             rustup target add "${{ matrix.target }}"
           fi
 
@@ -144,14 +147,14 @@ jobs:
             cargo test --workspace
           fi
 
-      - name: 打包模块 zip
+      - name: 打包全架构通用模块 zip
         if: matrix.target != ''
         working-directory: ${{ matrix.ws }}
         run: |
           set -euo pipefail
-          python3 build.py --release --abi arm64-v8a
+          python3 build.py --release
 
-      - name: 上传模块 zip 产物
+      - name: 上传通用模块 zip 产物
         if: matrix.target != ''
         uses: actions/upload-artifact@v4
         with:
