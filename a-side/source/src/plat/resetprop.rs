@@ -453,7 +453,9 @@ fn execute_has_system_feature(feature: &str) -> Result<bool> {
 
     let mut reply = proxy
         .submit_transact(
-            has_system_feature_transaction(kmr_common::android_version::android_major_version()),
+            has_system_feature_transaction(
+                kmr_common::android_version::host_android_major_version(),
+            ),
             &data,
             rsbinder::FLAG_CLEAR_BUF,
         )
@@ -483,7 +485,7 @@ fn has_system_feature_transaction(android_major: Option<i32>) -> rsbinder::Trans
 }
 
 fn telephony_transactions() -> TelephonyTransactions {
-    telephony_transactions_for(kmr_common::android_version::android_major_version())
+    telephony_transactions_for(kmr_common::android_version::host_android_major_version())
 }
 
 fn telephony_transactions_for(android_major: Option<i32>) -> TelephonyTransactions {

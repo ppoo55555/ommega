@@ -131,7 +131,10 @@ pub fn authorization_method_from_code_for(
 }
 
 pub fn authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {
-    authorization_method_from_code_for(kmr_common::android_version::android_major_version(), code)
+    authorization_method_from_code_for(
+        kmr_common::android_version::host_android_major_version(),
+        code,
+    )
 }
 
 fn current_authorization_method_from_code(code: u32) -> Option<AuthorizationMethod> {
@@ -189,7 +192,10 @@ pub fn maintenance_method_from_code_for(
 }
 
 pub fn maintenance_method_from_code(code: u32) -> Option<MaintenanceMethod> {
-    maintenance_method_from_code_for(kmr_common::android_version::android_major_version(), code)
+    maintenance_method_from_code_for(
+        kmr_common::android_version::host_android_major_version(),
+        code,
+    )
 }
 
 fn current_maintenance_method_from_code(code: u32) -> Option<MaintenanceMethod> {
@@ -231,7 +237,10 @@ pub fn service_method_from_code_for(
 }
 
 pub fn service_method_from_code(code: u32) -> Option<ServiceMethod> {
-    service_method_from_code_for(kmr_common::android_version::android_major_version(), code)
+    service_method_from_code_for(
+        kmr_common::android_version::host_android_major_version(),
+        code,
+    )
 }
 
 fn current_service_method_from_code(code: u32) -> Option<ServiceMethod> {

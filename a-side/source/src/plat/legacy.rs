@@ -24,7 +24,7 @@ thread_local! {
 }
 
 pub fn should_use_aaid_provider() -> bool {
-    should_use_legacy_aaid_provider(kmr_common::android_version::android_major_version())
+    should_use_legacy_aaid_provider(kmr_common::android_version::host_android_major_version())
 }
 
 fn should_use_legacy_aaid_provider(android_major_version: Option<i32>) -> bool {

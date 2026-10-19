@@ -323,7 +323,7 @@ fn keymint_instance_declared_in_vintf(security_level: SecurityLevel) -> bool {
 }
 
 fn fallback_keymint_version_from_android() -> i32 {
-    match kmr_common::android_version::android_major_version() {
+    match kmr_common::android_version::host_android_major_version() {
         Some(version) if version >= 17 => KEYMINT_V5,
         Some(16) => KEYMINT_V4,
         Some(14 | 15) => KEYMINT_V3,

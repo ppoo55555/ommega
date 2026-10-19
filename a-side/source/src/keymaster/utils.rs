@@ -1270,7 +1270,7 @@ pub fn app_info_for_uid(uid: AppUid) -> AppInfo {
             }
         };
 
-    match package_manager_native_layout(kmr_common::android_version::android_major_version()) {
+    match package_manager_native_layout(kmr_common::android_version::host_android_major_version()) {
         layout @ (PackageManagerNativeLayout::Android12To14
         | PackageManagerNativeLayout::Android15Or16) => {
             app_info_for_uid_legacy_pm(&pm, uid, app_info, layout)

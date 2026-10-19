@@ -108,7 +108,7 @@ fn resolve_keystore2_aidl_metadata() -> anyhow::Result<Keystore2AidlMetadata> {
 }
 
 fn fallback_keystore2_aidl_version_from_android() -> i32 {
-    kmr_common::android_version::android_major_version()
+    kmr_common::android_version::host_android_major_version()
         .and_then(kmr_common::consts::android_system_keystore2_aidl_version_for_android_major)
         .unwrap_or(kmr_common::consts::ANDROID_SYSTEM_KEYSTORE2_LATEST_AIDL_VERSION)
 }

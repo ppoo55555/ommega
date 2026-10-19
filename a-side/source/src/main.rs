@@ -263,7 +263,8 @@ fn should_resolve_module_info_bundle(android_major_version: Option<i32>) -> bool
 }
 
 fn install_module_info_bundle_if_available() -> Result<()> {
-    if !should_resolve_module_info_bundle(kmr_common::android_version::android_major_version()) {
+    if !should_resolve_module_info_bundle(kmr_common::android_version::host_android_major_version())
+    {
         info!("skipping moduleHash input on pre-Android 16 system");
         return Ok(());
     }

@@ -562,11 +562,14 @@ impl NativeBinderApi {
             parcel_view_platform_const.is_none() || parcel_view_platform_mut.is_none();
         if legacy_aparcel_layout
             && !matches!(
-                kmr_common::android_version::android_major_version(),
+                kmr_common::android_version::host_android_major_version(),
                 Some(12 | 13)
             )
         {
-            bail!("AParcel_viewPlatformParcel is unavailable outside Android 12/13");
+            log::warn!(
+                "AParcel_viewPlatformParcel is missing on reported host version {:?}; using legacy AParcel layout",
+                kmr_common::android_version::host_android_major_version()
+            );
         }
         let platform_parcel_data = load_symbol(binder, b"_ZNK7android6Parcel4dataEv\0")?;
         let platform_parcel_data_size = load_symbol(binder, b"_ZNK7android6Parcel8dataSizeEv\0")?;

@@ -617,7 +617,7 @@ fn check_android_permission(
     permission: &str,
     permission_denied: KsError,
 ) -> anyhow::Result<()> {
-    match android_permission_check_path(kmr_common::android_version::android_major_version()) {
+    match android_permission_check_path(kmr_common::android_version::host_android_major_version()) {
         AndroidPermissionCheckPath::PermissionController => {
             check_android_permission_with_controller(caller, permission, permission_denied)
         }

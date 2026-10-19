@@ -48,7 +48,7 @@ const FLAT_BINDER_FLAG_TXN_SECURITY_CTX: u32 = 0x1000;
 
 pub(crate) fn vintf_stability_wire() -> i32 {
     if matches!(
-        kmr_common::android_version::android_major_version(),
+        kmr_common::android_version::host_android_major_version(),
         Some(version) if version <= 12
     ) {
         0x3f00_0001
