@@ -37,6 +37,14 @@ fn resolve(call: &SoterCall) -> Outcome {
         // 号码不在转发表里（空号、app 侧那套号码）：老规矩，本地能答就本地答。
         return Outcome::Local;
     };
+    // 只读 op 的短 TTL 缓存：微信一轮支付会把 has_auth_key / export_* 反复问好几遍，
+    // 每次都走一趟 B（那边偶发三秒多的抖动），而答案几秒内不会变。写操作来了直接清空。
+    let cache_key = cache_slot(call);
+    if let Some(key) = cache_key.as_deref() {
+        if let Some(blob) = cache_get(key) {
+            return Outcome::decode(&blob).unwrap_or(Outcome::Local);
+        }
+    }
     let blob = match crate::ipc::forward_soter(&request) {
         Ok(blob) => blob,
         Err(error) => {
@@ -44,7 +52,82 @@ fn resolve(call: &SoterCall) -> Outcome {
             return Outcome::Local;
         }
     };
-    Outcome::decode(&blob).unwrap_or(Outcome::Local)
+    let outcome = Outcome::decode(&blob).unwrap_or(Outcome::Local);
+    match cache_key {
+        Some(key) => cache_put(&key, &blob, &outcome),
+        None => cache_clear(),
+    }
+    outcome
+}
+
+/// 只读 op 的缓存槽名；写 op / 签名类返回 `None`（同时意味着要清缓存）。
+fn cache_slot(call: &SoterCall) -> Option<String> {
+    // 1.7.4 加的只读 op 本地缓存先关掉：微信开通一轮里会反复问 has_ask_already /
+    // export_ask_public_key，而它自己又在清场重建。缓存把「清场前那把 ASK」多续三秒，
+    // 微信拿到的一直是旧钥匙，比不过就再清一轮 —— 表现就是建了立刻删。
+    // 1.7.3 没有这个缓存，先回到那个行为。
+    let _ = call;
+    return None;
+    #[allow(unreachable_code)]
+    let op = soter_relay::op_for_code(call.code)?;
+    let readable = matches!(
+        op,
+        "has_auth_key" | "has_ask_already" | "export_ask_public_key" | "export_auth_key_public_key"
+    );
+    if !readable {
+        return None;
+    }
+    let uid = call.uid.unwrap_or(-1);
+    let alias = call.alias.as_deref().unwrap_or("");
+    Some(format!("{op}|{uid}|{alias}"))
+}
+
+/// 缓存条目：原始答复字节 + 写入时刻。
+static READ_CACHE: std::sync::Mutex<
+    Option<std::collections::HashMap<String, (std::time::Instant, Vec<u8>)>>,
+> = std::sync::Mutex::new(None);
+/// 只读答复在几秒内不会变；再长就会让「刚建的钥匙」看起来还不存在。
+const READ_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn cache_get(key: &str) -> Option<Vec<u8>> {
+    let mut guard = READ_CACHE.lock().ok()?;
+    let map = guard.as_mut()?;
+    match map.get(key) {
+        Some((at, blob)) if at.elapsed() <= READ_CACHE_TTL => Some(blob.clone()),
+        Some(_) => {
+            map.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn cache_put(key: &str, blob: &[u8], outcome: &Outcome) {
+    // 只缓存「成功且非空」的答复：失败码（比如 -8 没这把钥匙）不能存，
+    // 否则刚生成的钥匙会被旧答案盖住。
+    let ok = matches!(outcome, Outcome::Buffer { code, .. } if *code == 0)
+        || matches!(outcome, Outcome::Code(0));
+    let mut guard = match READ_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if !ok {
+        map.remove(key);
+        return;
+    }
+    if map.len() > 256 {
+        map.clear();
+    }
+    map.insert(key.to_string(), (std::time::Instant::now(), blob.to_vec()));
+}
+
+fn cache_clear() {
+    if let Ok(mut guard) = READ_CACHE.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.clear();
+        }
+    }
 }
 
 /// 拼 daemon 要的 JSON。号码不在转发表里返回 `None`（不转发）。
@@ -103,6 +186,25 @@ fn request_with_table(call: &SoterCall, table: Option<&str>) -> Option<String> {
         if let Some(pkg) = pkg {
             out.push_str(",\"caller_pkg\":");
             push_json_string(&mut out, &pkg);
+        }
+    } else if let Some(uid) = call.uid.filter(|uid| *uid > 0) {
+        // 没有内核给的 sender_euid：我们接管的是 HAL 层，到这里调用方已经是
+        // soterserver（系统进程），App 的身份早就不在 binder 头里了。只能拿 SOTER 参数
+        // 里那个 uid（App 自己填的）翻一把。它**不可信** —— 探测机（春秋/鸭子）故意填
+        // 假 uid —— 所以必须带 `caller_pkg_src=arg`：服务端只拿它做负向判断（包名不在
+        // 真应用白名单就服务端作答、不落 B），绝不用它放行真机。
+        let pkg = match table {
+            Some(table) => lookup_in_table(table, uid as u32),
+            None => caller_package_for_uid(uid as u32),
+        };
+        log::info!(
+            "event=soter arg uid={uid} pkg={}",
+            pkg.as_deref().unwrap_or("-")
+        );
+        if let Some(pkg) = pkg {
+            out.push_str(",\"caller_pkg\":");
+            push_json_string(&mut out, &pkg);
+            out.push_str(",\"caller_pkg_src\":\"arg\"");
         }
     }
     out.push('}');

@@ -2,8 +2,8 @@
 
 [中文](CHANGELOG.md)
 
-## 1.7.2
+## 1.7.4
 
-- SOTER is now answered by the module's own software service, which replaces the vendor SOTER service outright: signing still works when the vendor one cannot start, and WeChat plus the engineering-mode SOTER status follow along.
-- The panel switch is now literally "replace the system SOTER service": turning it off restores the vendor one, and the takeover happens automatically at boot.
-- Fixed the SOTER host crashing in a loop with the takeover on; if the takeover cannot come up it falls back to the vendor service instead of leaving the phone broken.
+- Fingerprint payments no longer stall: the wait for the real device to pick up a task dropped from seconds to well under a hundred milliseconds.
+- Detector apps no longer occupy the real device; their requests are handled locally, leaving the real device for apps that actually need fingerprint payments.
+- Each step of a fingerprint payment dropped from about a second to the hundred-millisecond range, and the intermittent "setup failed" is gone.

@@ -11,7 +11,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::auth::AuthState;
@@ -1042,7 +1042,44 @@ pub async fn soter(
 /// SOTER 入口；设备会话在 inner 的设备层补签之后按实际设备清理。
 /// 服务端回退层不消费其他设备的同号会话。
 async fn run_soter_task(state: &AppState, body: &Value) -> Response {
-    run_soter_task_inner(state, body).await
+    // 同一台 B 的 SOTER 请求排队执行（见 `soter_device_guard`）。设备 ID 在这里就归一：
+    // A 端留空 + 配了默认设备 = 等同于它带了那个 id，跟 inner 一个口径。
+    let filled = crate::default_device::fill_in_body(body);
+    let device = filled
+        .get("device_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let _guard = soter_device_guard(&device).await;
+    run_soter_task_inner(state, &filled).await
+}
+
+/// 设备级串行锁：同一台 B 上的 SOTER 请求一个个来。
+///
+/// 设备侧 TA 一台只保留一个会话（见 `soter_sign_sessions` 模块注释，2026-10-01 实测）：
+/// 两个 `init_sign` 同时在飞，后到的会把前一张会话顶掉，前一笔的 `finish_sign` 只能回
+/// -204 靠补签兜。现场表现就是“刚弄好，别人的请求进来把状态毁了”——而且补签要重跑
+/// 一遗，慢、偶尔还补不回来。按设备排队后，这种互顶从源头上就不会发生；不同设备
+/// 互不影响，排队时长由调用方自己的 deadline 卡着。
+static SOTER_DEVICE_LOCKS: LazyLock<
+    Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+async fn soter_device_guard(device: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut guard = SOTER_DEVICE_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 只留还在被持有的，别让这张表跟着设备数无限长。
+        if guard.len() > 512 {
+            guard.retain(|_, entry| Arc::strong_count(entry) > 1);
+        }
+        guard
+            .entry(device.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    lock.lock_owned().await
 }
 
 /// 补签最多试几次。第二次是给「设备层那一瞬没答出来」准备的 —— 那种是瞬时的。
@@ -1331,25 +1368,26 @@ async fn run_soter_task_inner(state: &AppState, body: &Value) -> Response {
         probe_alias_arg,
         body.get(crate::soter_probe::CALLER_PKG_FIELD)
             .and_then(Value::as_str),
+        body.get(crate::soter_probe::CALLER_PKG_SRC_FIELD)
+            .and_then(Value::as_str),
     )
     .or_else(|| forced_local.then(|| "这轮会话是内置料上开的".to_string()))
     {
-        let reply = run_layer_soter(state, "builtin", body, requested).await;
-        if let Some(v) = reply.filter(|v| v.get("error").is_none()) {
-            if op == "init_sign" {
-                if let Some(session) = v.get("session").and_then(Value::as_i64) {
-                    crate::soter_probe::note_session_side(requested, session, false);
-                }
-            }
-            tracing::info!(
-                "soter: op={op} uid={probe_uid} alias={probe_alias} 探测机（{why}）\
-                 用服务端内置物料作答，不落 B"
-            );
-            return Json(v).into_response();
-        }
-        // 内置层不认这个 op（`generate_app_secure_key` 之类）：照原来的路走，别把探测机
-        // 变成 503。
-        tracing::warn!("soter: op={op} uid={probe_uid} 探测机（{why}）内置层不认这笔，照原路走");
+        // 白名单外（检测器一类）：**不造料**，直接告诉 A 端「这笔你自己本地答」。
+        // 造料要现签名，几十台检测器一起刷就把 CPU 占满，真应用的请求只能排队；
+        // 退回 A 端本地后，工作负载分散到各台手机上，服务端只负责转发真应用。
+        // 旧 A 端不认识 `local_only`，会当成「答复形状不认识」放给真 HAL，
+        // 也就是本地能答就答 —— 方向一致，不会把人卡住。
+        tracing::info!(
+            "soter: op={op} uid={probe_uid} alias={probe_alias} 探测机（{why}）\
+             直接退回 A 端本地作答，不造料、不落 B"
+        );
+        return Json(json!({
+            "op": op,
+            "local_only": true,
+            "error_code": -1001,
+        }))
+        .into_response();
     }
 
     let gate_uid = body.get("uid").and_then(Value::as_i64).map(|v| v as i32);
@@ -1376,7 +1414,6 @@ async fn run_soter_task_inner(state: &AppState, body: &Value) -> Response {
         return Json(hit).into_response();
     }
 
-    let serverbox = state.fulfill.is_enabled();
     let request_deadline =
         tokio::time::Instant::now() + Duration::from_secs(state.cfg.soter_wait_result_timeout_secs);
     let mut last_error: Option<String> = None;
@@ -1453,7 +1490,6 @@ async fn run_soter_task_inner(state: &AppState, body: &Value) -> Response {
     } else {
         None
     };
-    let used_fallback = fallback_target.is_some();
     let b_target = if fallback_wanted {
         fallback_target
     } else {
@@ -1464,13 +1500,7 @@ async fn run_soter_task_inner(state: &AppState, body: &Value) -> Response {
     // 这台接不了（离线、能力不足、或这一笔做不下去）时才接管。没点名、或点名那台
     // 不可用时保持原来的模式顺序（serverbox 先服务端）。
     // 点名的 B 能用、或者落到了兜底 B，都先走 B；两者都没有才按模式顺序。
-    let named_b_usable =
-        (!route_request.is_empty() && b_target.as_deref() == Some(route_request)) || used_fallback;
-    let order: &[&str] = if serverbox && !named_b_usable {
-        &["keybox", "b", "self_signed"]
-    } else {
-        &["b", "keybox", "self_signed"]
-    };
+    let order: &[&str] = &["b", "keybox", "self_signed"];
 
     // Physical finish must never fall through to a fabricated session or repair
     // without a live lease. Unknown/expired handles are terminal business errors.

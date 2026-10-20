@@ -82,6 +82,21 @@ pub struct FilterConfig {
     /// `clienta_global_scope()`.  Local-vs-remote handling is NOT affected:
     /// this only widens which callers get handled by ommega.
     pub global_scope: bool,
+    /// 系统 uid（< AID_APP_START）里额外放行接管的 SELinux 域前缀。
+    ///
+    /// 默认 `engineermode`：一加/OPPO 的工程模式跑在 system uid +
+    /// `engineermode_app` 域上，它的 Key 状态页要用 AndroidKeyStore 做
+    /// attestation 自检；不接管就只能看到原厂 TEE 的 ATTK 状态（未预制 → -74）。
+    /// 放行要求域以 `_app` 结尾，system_server / init / keystore 这类平台进程
+    /// 不受影响。
+    pub allow_system_sids: Vec<String>,
+    /// 系统 uid 的 app 域对应哪个包：`域前缀 -> 包名列表`。
+    ///
+    /// `getKeyAttestationApplicationId(1000)` 对系统 uid 返回空，调用方的包名
+    /// 根本解析不出来（决策日志里一直是 `packages=[]`），按包判定的 scope 自然
+    /// 命不中。这里把域映射回包名，之后跟普通 app 一样照 `scoop` / `deny_packages`
+    /// / `global_scope` 判定——配了才接管，没配就不接管。
+    pub system_sid_packages: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -144,6 +159,11 @@ impl Default for FilterConfig {
             block_android_package: true,
             allow_unknown_package: false,
             global_scope: false,
+            allow_system_sids: vec!["engineermode".to_string()],
+            system_sid_packages: BTreeMap::from([(
+                "engineermode".to_string(),
+                vec!["com.oplus.engineermode".to_string()],
+            )]),
         }
     }
 }

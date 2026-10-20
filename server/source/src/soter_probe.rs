@@ -192,6 +192,9 @@ fn uid_listed(device: &str, uid: i32, list: &str) -> bool {
 /// `caller_pkg` 字段名：A 端把「真正调用者是谁」的包名带过来（设备本地解析，精确）。
 /// 带了就按它判白名单；没带（老 A 端）就沿用下面那套别名/槽位逻辑。
 pub const CALLER_PKG_FIELD: &str = "caller_pkg";
+/// `caller_pkg` 的来源：`arg` 表示从 SOTER 参数里 App 自己填的 uid 翻出来的，
+/// 不可信 —— 只做负向拦截（不在白名单就服务端作答），绝不用它放行真机。
+pub const CALLER_PKG_SRC_FIELD: &str = "caller_pkg_src";
 
 /// 真应用的包名白名单：这些才交给真机，其余一律内置料。
 ///
@@ -237,18 +240,24 @@ pub const DEFAULT_REAL_APP_PACKAGES: &str = concat!(
 /// `soter_local_only_prefixes` / `soter_local_only_uids` 两个旧名单还留着当人工口子：
 /// 前者点名「永远本地」，后者点名「永远当真应用」。
 pub fn reason(cfg: &Config, device: &str, uid: Option<i32>, alias: Option<&str>) -> Option<String> {
-    reason_with_caller(cfg, device, uid, alias, None)
+    reason_with_caller(cfg, device, uid, alias, None, None)
 }
 
-/// 带「真调用者包名」的版本：A 端传了 `caller_pkg` 就按包名白名单判（精确），
+/// 带「调用者包名」的版本：A 端传了 `caller_pkg` 就按包名白名单判（精确），
 /// 没传就走旧的别名/槽位逻辑。
+///
+/// `caller_pkg_src` 只用来记日志/统计：实测系统自带的 `SoterService` 调 HAL 时一律
+/// 用 `Binder.getCallingUid()`（内核填的真实 App uid），而不是 App 传进来的参数，
+/// 所以 A 端拿这个 uid 翻出来的包名是真的，探测机伪造不了。
 pub fn reason_with_caller(
     cfg: &Config,
     device: &str,
     uid: Option<i32>,
     alias: Option<&str>,
     caller_pkg: Option<&str>,
+    caller_pkg_src: Option<&str>,
 ) -> Option<String> {
+    let pkg_is_arg = caller_pkg_src.is_some_and(|src| src.trim().eq_ignore_ascii_case("arg"));
     if let Some(pkg) = caller_pkg.map(str::trim).filter(|p| !p.is_empty()) {
         let packages = if cfg.soter_real_app_packages.trim().is_empty() {
             DEFAULT_REAL_APP_PACKAGES.to_string()
@@ -259,16 +268,19 @@ pub fn reason_with_caller(
         // 一个 uid 可能挂着好几个包（GMS 那种共享 uid），A 端把本机解析出来的包名
         // 逗号连起来一起报；命中任意一个就算真应用。
         let callers = split_list(pkg);
-        if callers
+        let is_real = callers
             .iter()
-            .any(|caller| known.iter().any(|name| name == caller))
-        {
+            .any(|caller| known.iter().any(|name| name == caller));
+        if is_real {
             // 真应用：交给真机，顺便把它的槽位标上（下一笔不带包名时不至于判错）。
             let now = chrono::Utc::now().timestamp_millis();
             if let (Some(uid), Ok(mut guard)) = (uid, NOTES.lock()) {
                 let notes = guard.get_or_insert_with(Notes::default);
                 notes.observe(device, uid, now);
                 notes.served(device, uid, true, now);
+            }
+            if pkg_is_arg {
+                tracing::debug!("soter: 包名 {pkg} 命中白名单（uid 由 SoterService 用 Binder.getCallingUid 提供）");
             }
             return None;
         }
@@ -293,6 +305,15 @@ fn reason_without_caller(
     let force_real = uid
         .map(|uid| uid_listed(device, uid, cfg.soter_local_only_uids.as_str()))
         .unwrap_or(false);
+
+    // 只认包名（2026-10-20 定）：带 uid 但没包名 = 老 A 端，没有可信判据，
+    // 一律服务端作答；想落到真机就自己更新 A 端。
+    // 没 uid 的那几笔（`finish_sign` / `getDeviceId`）不在这里拍板：它们是会话类
+    // 调用，必须回到开会话的那一侧，由 handler 的会话路由决定。
+    // `soter_local_only_uids` 点名的 uid 当人工逃生口，仍然走真机。
+    if uid.is_some() && !force_real {
+        return Some("调用方没携带可识别的包名（老 A 端），服务端就地作答".to_string());
+    }
 
     let mut guard = NOTES.lock().ok()?;
     let notes = guard.get_or_insert_with(Notes::default);
@@ -473,24 +494,61 @@ mod tests {
         let cfg = Config::default();
         for real in ["com.tencent.mm", "com.tencent.mobileqq"] {
             assert_eq!(
-                reason_with_caller(&cfg, DEV, Some(10490), Some("SoterAuthKeyV2_x"), Some(real)),
+                reason_with_caller(
+                    &cfg,
+                    DEV,
+                    Some(10490),
+                    Some("SoterAuthKeyV2_x"),
+                    Some(real),
+                    None
+                ),
                 None,
                 "{real} 应当给真机"
             );
         }
         for outside in ["com.duck.detector", "com.example.app"] {
-            let why = reason_with_caller(&cfg, DEV, Some(10490), None, Some(outside))
+            let why = reason_with_caller(&cfg, DEV, Some(10490), None, Some(outside), None)
                 .expect("不在名单里的得判内置");
             assert!(why.contains(outside), "{why}");
         }
         // 没带包名 → 老逻辑。用一个没在别处碰过的 uid：真应用那几笔会把这个槽位
         // 记成粘性的「真机答的」，用同一个 uid 验就验不到别名那条路了。
         assert!(
-            reason_with_caller(&cfg, DEV, Some(10666), Some("SomeRandomAlias"), None).is_some()
+            reason_with_caller(&cfg, DEV, Some(10666), Some("SomeRandomAlias"), None, None)
+                .is_some()
         );
     }
 
     /// 一个 uid 挂着好几个包时，A 端逗号连起来一起报；命中任意一个就算真应用。
+    /// 包名来自 SOTER 参数里的 uid（`src=arg`）：实测 SoterService 用
+    /// `Binder.getCallingUid()` 填这个值，所以跟在白名单里就应当放行。
+    #[test]
+    fn an_arg_sourced_package_is_trusted() {
+        let cfg = Config::default();
+        assert_eq!(
+            reason_with_caller(
+                &cfg,
+                DEV,
+                Some(10667),
+                Some("SomeRandomAlias"),
+                Some("com.tencent.mm"),
+                Some("arg")
+            ),
+            None,
+            "arg 来源的白名单包名来自真实 uid，应当放行"
+        );
+        let why = reason_with_caller(
+            &cfg,
+            DEV,
+            Some(10668),
+            Some("SoterAuthKeyV2_x"),
+            Some("com.duck.detector"),
+            Some("arg"),
+        )
+        .expect("不在白名单应当判内置");
+        assert!(why.contains("com.duck.detector"), "{why}");
+    }
+
     #[test]
     fn any_package_of_a_shared_uid_counts_as_a_real_app() {
         let cfg = Config::default();
@@ -500,15 +558,21 @@ mod tests {
             "a.b.c,com.eg.android.AlipayGphone",
         ] {
             assert_eq!(
-                reason_with_caller(&cfg, DEV, Some(10490), None, Some(pkg)),
+                reason_with_caller(&cfg, DEV, Some(10490), None, Some(pkg), None),
                 None,
                 "{pkg} 里有一个真应用就该给真机"
             );
         }
         // 一个都不在名单里 → 内置。
-        assert!(
-            reason_with_caller(&cfg, DEV, Some(10490), None, Some("com.a.one,com.b.two")).is_some()
-        );
+        assert!(reason_with_caller(
+            &cfg,
+            DEV,
+            Some(10490),
+            None,
+            Some("com.a.one,com.b.two"),
+            None
+        )
+        .is_some());
     }
 
     /// 缺省名单里放进来来的那几类包名不要手滑删掉（漏一个就是一台真应用被内置料顶掉），

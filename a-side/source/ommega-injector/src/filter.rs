@@ -114,12 +114,75 @@ pub struct FilterDecision {
     pub packages: Vec<String>,
 }
 
+/// 系统 uid（< AID_APP_START）里额外放行接管的那部分调用方。
+///
+/// 这些进程 uid 落在 system 范围，但 SELinux 域是 `u:r:xxx_app:s0`，也就是 ROM
+/// 自带的 app（一加/OPPO 的工程模式就是 `engineermode_app`），不是 system_server
+/// / init / keystore 那种平台进程——接管它们的 keystore 流量不会把系统拖进 boot
+/// loop。默认只放 `engineermode`（它现场建 test_key 用完就删，不依赖旧 blob）；
+/// 别的 ROM 组件要接管，往 config 的 `allow_system_sids` 里加域前缀。
+fn sid_allows_system_uid(sid: &str, config: &FilterConfig) -> bool {
+    let domain = sid.split(':').nth(2).unwrap_or("");
+    if !domain.ends_with("_app") {
+        return false;
+    }
+    if config
+        .allow_system_sids
+        .iter()
+        .any(|prefix| !prefix.is_empty() && domain.contains(prefix.as_str()))
+    {
+        return true;
+    }
+    config
+        .system_sid_packages
+        .keys()
+        .any(|prefix| !prefix.is_empty() && domain.contains(prefix.as_str()))
+}
+
+/// 系统 uid 的 app 域对应的包名（见 [`FilterConfig::system_sid_packages`]）。
+///
+/// `getKeyAttestationApplicationId` 对 uid 1000 返回空，包名解析不出来，按包
+/// 判定的 scope 就永远命不中；这里把域映射回包名，后面照常走 scope 判定。
+fn sid_mapped_packages(sid: &str, config: &FilterConfig) -> Vec<String> {
+    let domain = sid.split(':').nth(2).unwrap_or("");
+    if domain.is_empty() {
+        return Vec::new();
+    }
+    config
+        .system_sid_packages
+        .iter()
+        .filter(|(prefix, _)| !prefix.is_empty() && domain.contains(prefix.as_str()))
+        .flat_map(|(_, packages)| packages.iter().cloned())
+        .collect()
+}
+
 pub fn evaluate(
     scoop: &[String],
     config: &FilterConfig,
     uid: u32,
     resolution: PackageResolution,
 ) -> FilterDecision {
+    evaluate_with_sid(scoop, config, uid, "", resolution)
+}
+
+/// [`evaluate`] 带调用方 SELinux 上下文：系统 uid 的 ROM app（见
+/// [`sid_allows_system_uid`]）也能走到接管分支。
+pub fn evaluate_with_sid(
+    scoop: &[String],
+    config: &FilterConfig,
+    uid: u32,
+    sid: &str,
+    resolution: PackageResolution,
+) -> FilterDecision {
+    let mut resolution = resolution;
+    // 系统 uid 的 ROM app：uid 1000 解析出来的是「所有系统包 + android」，直接按它
+    // 判定两头不占好——`android` 前缀会把每笔调用当平台流量拒掉，scoop 里也永远
+    // 对不上。sid 命中映射时就用映射的包名整个换掉，之后照常走 scope 判定。
+    let mapped = sid_mapped_packages(sid, config);
+    if !mapped.is_empty() {
+        resolution = PackageResolution::Known(mapped);
+    }
+
     if !config.enabled {
         return FilterDecision {
             allowed: true,
@@ -136,7 +199,10 @@ pub fn evaluate(
     // not.  Intercepting system_server's own keystore traffic during boot makes
     // the system take a reply it cannot use and restart - observed on-device as
     // "boots and immediately powers off/reboots" with `global_scope: true`.
-    if config.block_android_package && uid % AID_USER_OFFSET < AID_APP_START {
+    if config.block_android_package
+        && uid % AID_USER_OFFSET < AID_APP_START
+        && !sid_allows_system_uid(sid, config)
+    {
         return FilterDecision {
             allowed: false,
             reason: FilterReason::RejectedAndroidPackage,
@@ -146,7 +212,6 @@ pub fn evaluate(
             },
         };
     }
-
     // Global scope ("全局作用域", toggled in the A-side WebUI's remote config)
     // intercepts ordinary apps, and *also* whatever is listed in the scope
     // explicitly (so Google Play / GMS components keep being handled).  ROM
@@ -185,7 +250,10 @@ pub fn evaluate(
         };
     }
 
-    if config.block_android_package && uid % AID_USER_OFFSET < AID_APP_START {
+    if config.block_android_package
+        && uid % AID_USER_OFFSET < AID_APP_START
+        && !sid_allows_system_uid(sid, config)
+    {
         return FilterDecision {
             allowed: false,
             reason: FilterReason::RejectedAndroidPackage,

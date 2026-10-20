@@ -34,7 +34,7 @@
 //! 参数校验、错误码这些都跟着真机宿主那套走（-5 是"这把钥匙不在这台设备上"，
 //! 实测宿主也是这么回的），这样上层看不出区别。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
@@ -141,6 +141,12 @@ struct State {
     auth: Mutex<HashMap<String, Key>>,
     /// uid -> 签名计数器（ASK JSON 里的 counter）。
     counters: Mutex<HashMap<i32, u64>>,
+    /// 哪些 uid 上已经「建过 ASK」。
+    ///
+    /// 9 号以前写死答 NOT_FOUND（防毒化，2026-10-11 那次事故），后果是 5 号刚建完、
+    /// 再问还是「没有」，App 和检测器（Duck 的 keyPrep）就永远卡在「ASK 没准备好」，
+    /// 只能一遍遍重来。这里记一笔，让本地这条路的 ASK 生命周期自洽。
+    ask_built: Mutex<HashSet<i32>>,
     /// 会话号 -> 这一次要签的挑战。
     sessions: Mutex<HashMap<i64, SignSession>>,
     /// 下一个会话号。起点用当前毫秒，看起来像真的。
@@ -201,6 +207,7 @@ fn state() -> Option<&'static State> {
                 ask,
                 auth: Mutex::new(HashMap::new()),
                 counters: Mutex::new(HashMap::new()),
+                ask_built: Mutex::new(HashSet::new()),
                 sessions: Mutex::new(HashMap::new()),
                 next_session: Mutex::new(now_millis()),
             })
@@ -235,39 +242,14 @@ struct CpuIdCache {
 
 static CPU_ID: Mutex<Option<CpuIdCache>> = Mutex::new(None);
 
-/// 这台机器该报的 cpu_id：daemon 写下的那份 > 按本机真实序列号现派生。
+/// 本地兜底这条路上该报的 cpu_id：**只按本机真实序列号派生**。
 ///
-/// 两处都是真实来源。一个都拿不到就返回空串 —— 那种机器我们没有任何真身份可报，
-/// 不许编（编出来的号在业务侧一眼假），本地这条路也就不报身份（见 [`answer`]）。
+/// 不能读 `/data/misc/ommega/soter_cpu_id` 那份：那是转发给服务端用的 **B 端真机号**
+/// （见 `src/soter_cpu_id.rs`）。本地兜底是 A 端自己的软件 TA，跟 B 不是同一台设备，
+/// 拿 B 的号会让同一个 uid 下出现两个不同的 cpu_id —— 检测器一条「两次 cpuid 不一致」
+/// 直接判红。两份身份各用各的：转发走 B 的号，本地走本机号。
 fn cpu_id() -> String {
-    let Ok(mut slot) = CPU_ID.lock() else {
-        return device_info().derived_cpu_id.clone().unwrap_or_default();
-    };
-    if let Some(cached) = slot.as_ref() {
-        if cached.read_at.elapsed() < CPU_ID_TTL {
-            return cached.value.clone();
-        }
-    }
-    let previous = slot.as_ref().map(|cached| cached.value.clone());
-    let (learned, origin) = load_cpu_id();
-    let value = learned
-        .or_else(|| device_info().derived_cpu_id.clone())
-        .unwrap_or_default();
-    if previous.as_deref() != Some(value.as_str()) {
-        if value.is_empty() {
-            log::warn!("soter local cpu_id -> <none> (no learned value, no real serialno)");
-        } else {
-            log::info!(
-                "soter local cpu_id {} -> {value} ({origin})",
-                previous.as_deref().unwrap_or("<unset>")
-            );
-        }
-    }
-    *slot = Some(CpuIdCache {
-        value: value.clone(),
-        read_at: std::time::Instant::now(),
-    });
-    value
+    device_info().derived_cpu_id.clone().unwrap_or_default()
 }
 
 /// 找一份学来的 cpu_id：环境变量 > 两个候选文件。找不到返回 `(None, "derived")`，
@@ -315,7 +297,7 @@ extern "C" {
 /// 读一条系统属性。payload 跑在 uid 1000 的系统进程里，直接调 bionic 比 fork 一个
 /// `getprop` 便宜几个数量级（签名这条路径上每毫秒都算数）。
 #[cfg(target_os = "android")]
-fn prop(name: &str) -> Option<String> {
+pub(crate) fn prop(name: &str) -> Option<String> {
     use std::ffi::CStr;
     let name = std::ffi::CString::new(name).ok()?;
     // bionic 的 PROP_VALUE_MAX 是 92，留点余量。
@@ -541,6 +523,11 @@ pub(crate) fn answer(call: &soter::SoterCall) -> Option<Answer> {
             if let Ok(mut map) = state.counters.lock() {
                 map.insert(uid, 0);
             }
+            // 记下来，下一次 9 号就要答「有」。以前不记，9 号又写死答没有，
+            // App 就会在这两步之间无限循环（Duck 的 keyPrep ask 永远是 false）。
+            if let Ok(mut set) = state.ask_built.lock() {
+                set.insert(uid);
+            }
             Some(Answer::Code(OK))
         }
         // generateAuthKeyPair(uid, alias)
@@ -562,7 +549,17 @@ pub(crate) fn answer(call: &soter::SoterCall) -> Option<Answer> {
         // 被腾讯拒了再自删重试 —— 一次本地兜底就把这个槽位毒化了（2026-10-11 实测；
         // 服务端 `soter_mint` 那两层同一个毛病，已一并改掉）。
         // 答 NOT_FOUND 之后应用会老实重新生成并上报；真机那条路一回来就能走通。
-        9 => Some(Answer::Code(NOT_FOUND)),
+        9 => {
+            // 本地这把 ASK 一直在（内置或自定义），但「这个 uid 上报过没有」得按 5 号
+            // 的真实建料记录答，否则 App 永远在「建完→问→没有」之间循环。
+            let uid = call.uid?;
+            let built = state
+                .ask_built
+                .lock()
+                .map(|set| set.contains(&uid))
+                .unwrap_or(false);
+            Some(Answer::Code(if built { OK } else { NOT_FOUND }))
+        }
         // hasAuthKey(uid, alias)
         10 => {
             let (uid, alias) = (call.uid?, call.alias.as_deref()?);
@@ -602,6 +599,10 @@ pub(crate) fn answer(call: &soter::SoterCall) -> Option<Answer> {
             let prefix = format!("{uid}|");
             if let Ok(mut map) = state.auth.lock() {
                 map.retain(|k, _| !k.starts_with(&prefix));
+            }
+            // 删干净了，下次 9 号就得答「没有」，让 App 重新走一遍建料。
+            if let Ok(mut set) = state.ask_built.lock() {
+                set.remove(&uid);
             }
             Some(Answer::Code(OK))
         }
