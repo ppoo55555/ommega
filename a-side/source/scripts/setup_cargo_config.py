@@ -3,6 +3,7 @@
 import argparse
 import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 
@@ -174,12 +175,39 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def fix_ndk_clang_builtins(ndk_root: Path, host_tag: str) -> None:
+    """lsplt-sys links -lclang_rt.builtins-{target_arch}-android.
+    For i686-linux-android, CARGO_CFG_TARGET_ARCH is 'x86', so it looks for
+    libclang_rt.builtins-x86-android.a, but the NDK names it
+    libclang_rt.builtins-i686-android.a.
+    Ensure a copy/symlink exists so linking does not fail.
+    """
+    clang_dir = ndk_root / "toolchains" / "llvm" / "prebuilt" / host_tag / "lib" / "clang"
+    if not clang_dir.is_dir():
+        return
+    for version_dir in clang_dir.iterdir():
+        linux_lib_dir = version_dir / "lib" / "linux"
+        if linux_lib_dir.is_dir():
+            i686_lib = linux_lib_dir / "libclang_rt.builtins-i686-android.a"
+            x86_lib = linux_lib_dir / "libclang_rt.builtins-x86-android.a"
+            if i686_lib.exists() and not x86_lib.exists():
+                try:
+                    try:
+                        x86_lib.symlink_to(i686_lib.name)
+                    except OSError:
+                        shutil.copy2(i686_lib, x86_lib)
+                    print(f"Created NDK compat library: {x86_lib}")
+                except Exception as exc:
+                    print(f"warning: failed to create {x86_lib}: {exc}", file=sys.stderr)
+
+
 def main() -> int:
     args = parse_args()
 
     try:
         ndk_root = detect_ndk_root(args.ndk_root)
         host_tag = resolve_host_tag(ndk_root, args.host_tag)
+        fix_ndk_clang_builtins(ndk_root, host_tag)
         rendered = render_config(ndk_root, host_tag, args.api_level)
     except (FileNotFoundError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

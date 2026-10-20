@@ -40,7 +40,10 @@ jobs:
             ws: server/source
             target: ""
     env:
+      ANDROID_NDK: /home/runner/android-ndk-r27d
+      ANDROID_NDK_HOME: /home/runner/android-ndk-r27d
       ANDROID_NDK_ROOT: /home/runner/android-ndk-r27d
+      NDK_HOME: /home/runner/android-ndk-r27d
     steps:
       - uses: actions/checkout@v4
 
@@ -101,6 +104,14 @@ jobs:
           unzip -q /tmp/ndk.zip -d /home/runner
           rm -f /tmp/ndk.zip
           test -x "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+
+      # lsplt-sys 用 CARGO_CFG_TARGET_ARCH (x86) 找 clang_rt.builtins-x86-android，
+      # 但 NDK 实际命名为 libclang_rt.builtins-i686-android.a。
+      - name: 补齐 NDK x86 编译器内置库别名
+        if: matrix.target != ''
+        run: |
+          set -euo pipefail
+          find "$ANDROID_NDK_ROOT" -name "libclang_rt.builtins-i686-android.a" -execdir cp -n libclang_rt.builtins-i686-android.a libclang_rt.builtins-x86-android.a \;
 
       - name: 生成 .cargo/config.toml
         if: matrix.target != ''

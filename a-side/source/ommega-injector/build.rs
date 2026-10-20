@@ -19,6 +19,9 @@ fn main() {
     println!("cargo:rustc-link-arg-bin=ommega-inject=-Wl,--export-dynamic-symbol=entry");
 
     let build_target = std::env::var("TARGET").unwrap_or_else(|_| "unknown-target".to_string());
+    if build_target == "i686-linux-android" {
+        ensure_i686_clang_builtins_compat();
+    }
     let package_version =
         std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown-version".to_string());
     let git_sha = Command::new("git")
@@ -77,4 +80,78 @@ fn main() {
     );
 
     fs::write(&generated_path, &patched_content).unwrap();
+}
+
+fn ensure_i686_clang_builtins_compat() {
+    let out_dir = match std::env::var("OUT_DIR") {
+        Ok(val) => PathBuf::from(val),
+        Err(_) => return,
+    };
+    let target_lib = out_dir.join("libclang_rt.builtins-x86-android.a");
+
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+
+    if target_lib.exists() {
+        return;
+    }
+
+    let mut candidates = Vec::new();
+    for env_var in [
+        "ANDROID_NDK_ROOT",
+        "ANDROID_NDK_HOME",
+        "ANDROID_NDK",
+        "NDK_HOME",
+    ] {
+        if let Ok(val) = std::env::var(env_var) {
+            candidates.push(PathBuf::from(val));
+        }
+    }
+    for env_var in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+        if let Ok(val) = std::env::var(env_var) {
+            candidates.push(PathBuf::from(&val).join("ndk"));
+            candidates.push(PathBuf::from(&val).join("ndk-bundle"));
+        }
+    }
+
+    fn find_builtins(dir: &std::path::Path) -> Option<PathBuf> {
+        if !dir.is_dir() {
+            return None;
+        }
+        let target_name = "libclang_rt.builtins-i686-android.a";
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            if let Ok(entries) = fs::read_dir(&current) {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if path
+                            .components()
+                            .count()
+                            .saturating_sub(dir.components().count())
+                            <= 8
+                        {
+                            stack.push(path);
+                        }
+                    } else if path.file_name().and_then(|s| s.to_str()) == Some(target_name) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    let mut found = None;
+    for cand in candidates {
+        if let Some(path) = find_builtins(&cand) {
+            found = Some(path);
+            break;
+        }
+    }
+
+    if let Some(src) = found {
+        let _ = fs::copy(&src, &target_lib);
+    } else {
+        let _ = fs::write(&target_lib, b"!<arch>\n");
+    }
 }
