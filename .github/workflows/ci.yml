@@ -66,11 +66,9 @@ jobs:
       # 得有 protoc 在手边（prost-build 0.11 起不再自带）。
       - name: 装 protoc
         if: matrix.name == 'a-side'
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends protobuf-compiler
-          protoc --version
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # injector 用 include_bytes! 把本地兜底 ASK 私钥编进二进制，而 `*.pem` 被仓库根的
       # .gitignore 排除（私钥不能进公开仓库），所以干净 checkout 里根本没有这个文件，
