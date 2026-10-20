@@ -83,6 +83,7 @@ fn cache_slot(call: &SoterCall) -> Option<String> {
 }
 
 /// 缓存条目：原始答复字节 + 写入时刻。
+#[allow(clippy::type_complexity)]
 static READ_CACHE: std::sync::Mutex<
     Option<std::collections::HashMap<String, (std::time::Instant, Vec<u8>)>>,
 > = std::sync::Mutex::new(None);

@@ -232,14 +232,17 @@ pub(crate) fn device_id() -> String {
 
 /// 这个值多久重新看一眼文件。真机 cpu_id 一辈子不换，这个时限只是为了「daemon 刚
 /// 学到新的、payload 不用重启就跟着改」，跟 `log_flag` 一样 30 秒。
+#[allow(dead_code)]
 const CPU_ID_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 当前该报的 cpu_id 加上它是什么时候看来的（来路只在换值那行日志里出现，不留）。
+#[allow(dead_code)]
 struct CpuIdCache {
     value: String,
     read_at: std::time::Instant,
 }
 
+#[allow(dead_code)]
 static CPU_ID: Mutex<Option<CpuIdCache>> = Mutex::new(None);
 
 /// 本地兜底这条路上该报的 cpu_id：**只按本机真实序列号派生**。
@@ -254,6 +257,7 @@ fn cpu_id() -> String {
 
 /// 找一份学来的 cpu_id：环境变量 > 两个候选文件。找不到返回 `(None, "derived")`，
 /// 调用方再用本机真实序列号现派生那份兜底（两处都没有才空着）。
+#[allow(dead_code)]
 fn load_cpu_id() -> (Option<String>, String) {
     let env = std::env::var_os(kmr_common::soter_relay::CPU_ID_ENV)
         .map(|raw| raw.to_string_lossy().into_owned());
@@ -261,6 +265,7 @@ fn load_cpu_id() -> (Option<String>, String) {
 }
 
 /// `load_cpu_id` 里跟「从哪读」无关的那半（测试要拿临时文件跑，不进进程环境）。
+#[allow(dead_code)]
 fn load_cpu_id_from(paths: &[&str], env: Option<String>) -> (Option<String>, String) {
     if let Some(raw) = env {
         match kmr_common::soter_relay::parse_cpu_id(raw.trim()) {
